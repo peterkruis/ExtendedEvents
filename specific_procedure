@@ -1,0 +1,23 @@
+/*
+Find how SP's are being executed.
+*/
+
+CREATE EVENT SESSION [track_name_of_procedure] ON SERVER 
+ADD EVENT sqlserver.module_start
+(
+    SET collect_statement=1
+    ACTION
+    (
+        sqlserver.client_app_name,
+        sqlserver.database_name,
+        sqlserver.session_server_principal_name,
+        sqlserver.username,
+        sqlserver.sql_text,
+        sqlserver.tsql_stack
+    )
+    WHERE 
+    (
+        [object_type]='P '
+        AND [object_name]=N'name_of_procedure'
+    )
+)
