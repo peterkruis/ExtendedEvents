@@ -1,7 +1,7 @@
 /*
 
 Will create an event which will keep track of the slow query's in this case 3 seconds (1m is 1 second)
-
+You will have the rpc or query in total, but if a statement in it also has a duration larger than 3 seconds you also retrieve that information.
 */
 
 
