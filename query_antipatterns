@@ -1,0 +1,13 @@
+/*
+
+Will retrieve some antipatterns from query's executed.
+
+*/
+
+CREATE EVENT SESSION [query_antipatterns] ON SERVER  
+     ADD EVENT sqlserver.query_antipattern (   
+        ACTION(sqlserver.client_app_name,sqlserver.plan_handle, 
+               sqlserver.query_hash,sqlserver.query_plan_hash,
+               sqlserver.sql_text)
+          ) ADD TARGET package0.ring_buffer(SET max_memory=(500)) 
+GO
