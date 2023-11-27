@@ -1,3 +1,10 @@
+/*
+
+Will create an event which will keep track of the slow query's in this case 3 seconds (1m is 1 second)
+
+*/
+
+
 CREATE EVENT SESSION [SlowQueriesAndStatementsLargerThan3Seconds]
    ON SERVER
    ADD EVENT sqlserver.rpc_completed
