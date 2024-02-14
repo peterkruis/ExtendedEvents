@@ -16,3 +16,29 @@ CREATE EVENT SESSION [CountExecutions]
 GO
 
 
+/*Looking into the data, I wanted to know which SP's are not used since startup*/
+SELECT
+     xed.XML_data.value('(value)[1]', 'varchar(256)') AS object_id,
+     xed.XML_data.value('(@count)[1]', 'varchar(256)') AS number_of_executions_since_20240214
+INTO #UsedObjects
+FROM (
+        SELECT CAST(xet.target_data AS XML) AS XML_data
+        FROM   sys.dm_xe_session_targets AS xet
+               JOIN sys.dm_xe_sessions AS xe ON (xe.address = xet.event_session_address)
+        WHERE  xe.name = 'CountExecutions' --We have specified the session name
+               AND target_name = 'histogram' --We have specified the target type (in case there are >1)
+     ) AS t
+     CROSS APPLY t.XML_data.nodes('//HistogramTarget/Slot') AS xed(XML_data);
+
+
+SELECT
+      o.name AS object_name,
+      s.name AS schema_name,
+      uo.object_id,
+      uo.number_of_executions_since_20240214
+FROM  sys.objects AS o
+      JOIN sys.schemas AS s ON s.schema_id = o.schema_id
+      LEFT JOIN #UsedObjects AS uo ON uo.object_id = o.object_id
+WHERE o.type = 'P'; /*voor nu alleen SP's*/
+
+DROP TABLE #UsedObjects;
