@@ -1,8 +1,9 @@
 CREATE EVENT SESSION [CountExecutions]
    ON SERVER
    ADD EVENT sqlserver.module_end
+   (WHERE ([object_id] > (0)))
    ADD TARGET package0.histogram
-   (SET filtering_event_name = N'sqlserver.module_end', slots = (10000), source = N'object_name', source_type = (0))
+   (SET filtering_event_name = N'sqlserver.module_end', slots = (10000), source = N'object_id', source_type = (0))
    WITH (
            MAX_MEMORY = 4096KB,
            EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
