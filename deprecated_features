@@ -1,0 +1,33 @@
+/*
+
+Find usage of deprecated features
+
+*/
+
+CREATE EVENT SESSION [DeprecatedFeatures]
+ON SERVER
+    ADD EVENT sqlserver.deprecation_announcement
+    (ACTION
+     (
+         sqlserver.sql_text
+     )
+    ),
+    ADD EVENT sqlserver.deprecation_final_support
+    (ACTION
+     (
+         sqlserver.sql_text
+     )
+    )
+WITH
+(
+    MAX_MEMORY = 4096KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 30 SECONDS,
+    MAX_EVENT_SIZE = 0KB,
+    MEMORY_PARTITION_MODE = NONE,
+    TRACK_CAUSALITY = OFF,
+    STARTUP_STATE = OFF
+);
+GO
+
+
