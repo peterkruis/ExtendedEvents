@@ -1,0 +1,29 @@
+CREATE EVENT SESSION [StatsUpdates]
+ON SERVER
+    ADD EVENT sqlserver.auto_stats
+    (ACTION
+     (
+         sqlserver.database_id,
+         sqlserver.sql_text
+     )
+     WHERE (
+               [status] = 'Other'
+               OR [status] = 'Loading and updating stats'
+           )
+    )
+    ADD TARGET package0.event_file
+    (SET filename = N'C:\Temp\StatsUpdates.xel', metadatafile = N'C:\Temp\StatsUpdates.xem')
+WITH
+(
+    MAX_MEMORY = 4096KB,
+    EVENT_RETENTION_MODE = ALLOW_SINGLE_EVENT_LOSS,
+    MAX_DISPATCH_LATENCY = 30 SECONDS,
+    MAX_EVENT_SIZE = 0KB,
+    MEMORY_PARTITION_MODE = NONE,
+    TRACK_CAUSALITY = OFF,
+    STARTUP_STATE = OFF
+);
+GO
+
+
+/*find (automatic) statistic rebuild*/
