@@ -1,0 +1,23 @@
+/*
+
+Since SQL Server 2022, there is the option to see the performance metrics for your Extended Events.
+
+https://www.sqlskills.com/blogs/jonathan/sql-server-2022-measuring-extended-events-performance-impacts/
+
+*/
+
+
+-- First enable trace flag (global):
+DBCC TRACEON(9708, -1)
+
+--See performance metrics.
+SELECT s.name AS session_name, 
+	event_name,
+	event_fire_count,
+	event_fire_average_time, 
+	event_fire_min_time, 
+	event_fire_max_time
+FROM sys.dm_xe_sessions AS s 
+INNER JOIN sys.dm_xe_session_events AS xse
+	ON s.address = xse.event_session_address
+ORDER BY event_fire_max_time DESC
