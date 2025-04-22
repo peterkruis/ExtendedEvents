@@ -1,0 +1,82 @@
+/*Reading from an event file*/
+SELECT event_data = CONVERT(XML, event_data),
+       object_name,
+       file_name,
+       file_offset,
+       timestamp_utc
+FROM sys.fn_xe_file_target_read_file(N'MySession*.xel', NULL, NULL, NULL);
+
+
+/*Great! Some XML.. , we should be able to retrieve some details from that..*/
+/*Let's spit this output into a temp table, so we can work on the data*/
+
+
+DROP TABLE IF EXISTS #RetrievedData;
+
+SELECT object_name,
+       event_data = CONVERT(XML, event_data),
+       file_name,
+       file_offset,
+       timestamp_utc
+INTO #RetrievedData
+FROM sys.fn_xe_file_target_read_file(N'MySession*.xel', NULL, NULL, NULL);
+
+SELECT ts = rd.event_data.value(N'(event/@timestamp)[1]', N'datetime'),
+       batch_text = rd.event_data.value(N'(event/data[@name="batch_text"]/value)[1]', N'nvarchar(max)'),
+       statement = rd.event_data.value(N'(event/data[@name="statement"]/value)[1]', N'nvarchar(max)'),
+       spid = rd.event_data.value(N'(event/action[@name="session_id"]/value)[1]', N'int'),
+       duration = rd.event_data.value(N'(event/data[@name="duration"]/value)[1]', N'bigint'),
+       dxoc.description AS duration_description /*some might contain other duration units*/
+FROM #RetrievedData AS rd
+    LEFT JOIN sys.dm_xe_object_columns AS dxoc
+        ON dxoc.name = 'duration'
+           AND dxoc.object_name = rd.object_name;
+
+
+DROP TABLE IF EXISTS #RetrievedData;
+
+GO
+
+/*But what if we would like to see the data from the ring_buffer? We might need it for SQL Server 2008*/
+/*Oh, don't forget to enable your trace first :)*/
+
+WITH cte
+AS (SELECT ed = CONVERT(XML, target_data)
+    FROM sys.dm_xe_session_targets xet
+        INNER JOIN sys.dm_xe_sessions xe
+            ON xe.[address] = xet.event_session_address
+    WHERE xe.name = N'MySession'
+          AND xet.target_name = N'ring_buffer')
+SELECT event_data = x.ed.query('.')
+FROM cte
+    CROSS APPLY cte.ed.nodes(N'RingBufferTarget/event') AS x(ed);
+
+
+/*Again a very nice XML*/
+DROP TABLE IF EXISTS #RetrievedData;
+
+WITH cte
+AS (SELECT ed = CONVERT(XML, target_data)
+    FROM sys.dm_xe_session_targets xet
+        INNER JOIN sys.dm_xe_sessions xe
+            ON xe.[address] = xet.event_session_address
+    WHERE xe.name = N'MySession'
+          AND xet.target_name = N'ring_buffer')
+SELECT event_data = x.ed.query('.')
+INTO #RetrievedData
+FROM cte
+    CROSS APPLY cte.ed.nodes(N'RingBufferTarget/event') AS x(ed);
+
+
+SELECT ts = event_data.value(N'(event/@timestamp)[1]', N'datetime'),
+       batch_text = event_data.value(N'(event/data[@name="batch_text"]/value)[1]', N'nvarchar(max)'),
+       statement = event_data.value(N'(event/data[@name="statement"]/value)[1]', N'nvarchar(max)'),
+       spid = event_data.value(N'(event/action[@name="session_id"]/value)[1]', N'int'),
+       duration = event_data.value(N'(event/data[@name="duration"]/value)[1]', N'bigint'),
+       event_name = event_data.value(N'(event/@name)[1]', N'nvarchar(max)'),
+       dxoc.description AS duration_description /*some might contain other duration units*/
+FROM #RetrievedData AS rd
+    LEFT JOIN sys.dm_xe_object_columns AS dxoc
+        ON dxoc.name = 'duration'
+           AND dxoc.object_name = event_data.value(N'(event/@name)[1]', N'nvarchar(max)');
+DROP TABLE IF EXISTS #RetrievedData;
