@@ -1,0 +1,312 @@
+SET NOCOUNT ON;
+
+DECLARE @SessionName sysname = 
+    N'SlowQueriesAndStatementsLargerThan3SecondsAndWaitsLongerThan1Second';
+
+DECLARE @EventFileBaseName nvarchar(260) = 
+    N'SlowQueriesAndStatementsLargerThan3SecondsAndWaitsLongerThan1Second';
+
+--DECLARE @StartTime DATETIME = '2026-06-16 00:00'; --- 0935 hebben we de productieorderplan view aangepast
+DECLARE @StartTime DATETIME = '2026-06-17 00:00';  
+DECLARE @LookbackMinutes int = (SELECT DATEDIFF(MINUTE, @StartTime, GETDATE()));
+--DECLARE @LookbackMinutes int = 60;          -- last hour
+--DECLARE @LookbackMinutes int = 1440;        -- last 24 hours
+--DECLARE @LookbackMinutes int = 10080;       -- last week
+--DECLARE @LookbackMinutes int = 43200;       -- last 30 days
+
+DECLARE @MinimumDurationUs bigint = 3000000;  -- 3 seconds
+
+DECLARE @InitialTop int = 1000;               -- rows inserted into temp table first
+DECLARE @Top int = 100;                       -- rows returned from temp table
+
+-- Options:
+-- statement : sql_statement_completed + sp_statement_completed
+-- batch_rpc : sql_batch_completed + rpc_completed
+-- all       : all slow query events, but can double-count stored procedure activity
+DECLARE @EventScope varchar(20) = 'statement';
+
+DECLARE @XelPath nvarchar(4000) = NULL;
+
+DECLARE @FromUtc datetime2(3) =
+    DATEADD(MINUTE, -@LookbackMinutes, SYSUTCDATETIME());
+
+IF OBJECT_ID('tempdb..#SlowQueryHashSummary') IS NOT NULL
+    DROP TABLE #SlowQueryHashSummary;
+
+/* Auto-detect folder from the active XE session */
+IF @XelPath IS NULL
+BEGIN
+    DECLARE @CurrentFile nvarchar(4000);
+
+    SELECT @CurrentFile =
+        CAST(t.target_data AS xml).value('(EventFileTarget/File/@name)[1]', 'nvarchar(4000)')
+    FROM sys.dm_xe_sessions AS s
+    JOIN sys.dm_xe_session_targets AS t
+        ON t.event_session_address = s.address
+    WHERE s.name = @SessionName
+      AND t.target_name = N'event_file';
+
+    IF @CurrentFile IS NULL
+    BEGIN
+        THROW 50000, 'Could not auto-detect XE file path. Set @XelPath manually.', 1;
+    END;
+
+    DECLARE @RevBackslash int = CHARINDEX(N'\', REVERSE(@CurrentFile));
+    DECLARE @RevSlash int = CHARINDEX(N'/', REVERSE(@CurrentFile));
+    DECLARE @RevSep int;
+
+    SET @RevSep =
+        CASE
+            WHEN @RevBackslash = 0 THEN NULLIF(@RevSlash, 0)
+            WHEN @RevSlash = 0 THEN @RevBackslash
+            WHEN @RevBackslash < @RevSlash THEN @RevBackslash
+            ELSE @RevSlash
+        END;
+
+    DECLARE @Folder nvarchar(4000) =
+        CASE
+            WHEN @RevSep IS NULL THEN N''
+            ELSE LEFT(@CurrentFile, LEN(@CurrentFile) - @RevSep + 1)
+        END;
+
+    SET @XelPath = @Folder + @EventFileBaseName + N'*.xel';
+END;
+
+SELECT
+    ReadingFilesFrom = @XelPath,
+    FromUtc = @FromUtc,
+    EventScope = @EventScope,
+    InitialTop = @InitialTop,
+    FinalTop = @Top;
+
+;WITH RawEvents AS
+(
+    SELECT
+        FileName = file_name,
+        FileOffset = file_offset,
+        EventXml = CAST(event_data AS xml)
+    FROM sys.fn_xe_file_target_read_file(@XelPath, NULL, NULL, NULL)
+),
+ParsedEvents AS
+(
+    SELECT
+        EventName =
+            EventXml.value('(/event/@name)[1]', 'sysname'),
+
+        EventTimeUtc =
+            CAST(
+                SWITCHOFFSET(
+                    TRY_CONVERT(
+                        datetimeoffset(7),
+                        EventXml.value('(/event/@timestamp)[1]', 'nvarchar(50)'),
+                        127
+                    ),
+                    '+00:00'
+                ) AS datetime2(3)
+            ),
+
+        DurationUs =
+            TRY_CONVERT(
+                bigint,
+                EventXml.value('(/event/data[@name="duration"]/value/text())[1]', 'nvarchar(50)')
+            ),
+
+        LogicalReads =
+            TRY_CONVERT(
+                bigint,
+                EventXml.value('(/event/data[@name="logical_reads"]/value/text())[1]', 'nvarchar(50)')
+            ),
+
+        PhysicalReads =
+            TRY_CONVERT(
+                bigint,
+                EventXml.value('(/event/data[@name="physical_reads"]/value/text())[1]', 'nvarchar(50)')
+            ),
+
+        Writes =
+            TRY_CONVERT(
+                bigint,
+                EventXml.value('(/event/data[@name="writes"]/value/text())[1]', 'nvarchar(50)')
+            ),
+
+        CpuTimeUs =
+            TRY_CONVERT(
+                bigint,
+                EventXml.value('(/event/data[@name="cpu_time"]/value/text())[1]', 'nvarchar(50)')
+            ),
+
+        QueryHash =
+            NULLIF(
+                EventXml.value('(/event/action[@name="query_hash"]/value/text())[1]', 'nvarchar(64)'),
+                N''
+            ),
+
+        DatabaseName =
+            NULLIF(
+                EventXml.value('(/event/action[@name="database_name"]/value/text())[1]', 'sysname'),
+                N''
+            ),
+
+        SessionId =
+            TRY_CONVERT(
+                int,
+                EventXml.value('(/event/action[@name="session_id"]/value/text())[1]', 'nvarchar(20)')
+            ),
+
+        ClientAppName =
+            NULLIF(
+                EventXml.value('(/event/action[@name="client_app_name"]/value/text())[1]', 'nvarchar(256)'),
+                N''
+            ),
+
+        ClientHostName =
+            NULLIF(
+                EventXml.value('(/event/action[@name="client_hostname"]/value/text())[1]', 'nvarchar(256)'),
+                N''
+            ),
+
+        UserName =
+            NULLIF(
+                EventXml.value('(/event/action[@name="username"]/value/text())[1]', 'nvarchar(256)'),
+                N''
+            ),
+
+        QueryText =
+            COALESCE(
+                NULLIF(EventXml.value('(/event/data[@name="statement"]/value/text())[1]', 'nvarchar(max)'), N''),
+                NULLIF(EventXml.value('(/event/data[@name="batch_text"]/value/text())[1]', 'nvarchar(max)'), N''),
+                NULLIF(EventXml.value('(/event/action[@name="sql_text"]/value/text())[1]', 'nvarchar(max)'), N'')
+            )
+    FROM RawEvents
+),
+FilteredEvents AS
+(
+    SELECT *
+    FROM ParsedEvents
+    WHERE EventTimeUtc >= @FromUtc
+      AND DurationUs >= @MinimumDurationUs
+      AND QueryHash IS NOT NULL
+      AND
+      (
+          @EventScope = 'all'
+          OR
+          (
+              @EventScope = 'statement'
+              AND EventName IN
+              (
+                  N'sql_statement_completed',
+                  N'sp_statement_completed'
+              )
+          )
+          OR
+          (
+              @EventScope = 'batch_rpc'
+              AND EventName IN
+              (
+                  N'sql_batch_completed',
+                  N'rpc_completed'
+              )
+          )
+      )
+),
+RankedExamples AS
+(
+    SELECT
+        *,
+        rn = ROW_NUMBER() OVER
+        (
+            PARTITION BY QueryHash
+            ORDER BY DurationUs DESC, EventTimeUtc DESC
+        )
+    FROM FilteredEvents
+),
+Aggregated AS
+(
+    SELECT
+        QueryHash,
+        NumberOfSlowness = COUNT_BIG(*),
+
+        AvgDurationMs =
+            CAST(AVG(CONVERT(decimal(19,2), DurationUs)) / 1000.0 AS decimal(19,2)),
+
+        AvgDurationSec =
+            CAST(AVG(CONVERT(decimal(19,2), DurationUs)) / 1000000.0 AS decimal(19,3)),
+
+        MaxDurationSec =
+            CAST(MAX(CONVERT(decimal(19,2), DurationUs)) / 1000000.0 AS decimal(19,3)),
+
+        AvgReads =
+            CAST(AVG(CONVERT(decimal(19,2), LogicalReads)) AS decimal(19,2)),
+
+        AvgPhysicalReads =
+            CAST(AVG(CONVERT(decimal(19,2), PhysicalReads)) AS decimal(19,2)),
+
+        AvgWrites =
+            CAST(AVG(CONVERT(decimal(19,2), Writes)) AS decimal(19,2)),
+
+        AvgCpuMs =
+            CAST(AVG(CONVERT(decimal(19,2), CpuTimeUs)) / 1000.0 AS decimal(19,2)),
+
+        FirstSeenUtc = MIN(EventTimeUtc),
+        LastSeenUtc = MAX(EventTimeUtc)
+    FROM FilteredEvents
+    GROUP BY QueryHash
+)
+SELECT TOP (@InitialTop)
+    a.QueryHash,
+    a.NumberOfSlowness,
+    a.AvgDurationMs,
+    a.AvgDurationSec,
+    a.MaxDurationSec,
+    a.AvgReads,
+    a.AvgPhysicalReads,
+    a.AvgWrites,
+    a.AvgCpuMs,
+    a.FirstSeenUtc,
+    a.LastSeenUtc,
+
+    ExampleEventName = e.EventName,
+    ExampleDatabaseName = e.DatabaseName,
+    ExampleDurationSec =
+        CAST(CONVERT(decimal(19,2), e.DurationUs) / 1000000.0 AS decimal(19,3)),
+    ExampleReads = e.LogicalReads,
+    ExampleClientAppName = e.ClientAppName,
+    ExampleClientHostName = e.ClientHostName,
+    ExampleUserName = e.UserName,
+    ExampleQueryText = e.QueryText
+INTO #SlowQueryHashSummary
+FROM Aggregated AS a
+JOIN RankedExamples AS e
+    ON e.QueryHash = a.QueryHash
+   AND e.rn = 1
+ORDER BY
+    a.NumberOfSlowness DESC,
+    a.AvgDurationMs DESC;
+
+CREATE CLUSTERED INDEX CX_SlowQueryHashSummary
+ON #SlowQueryHashSummary
+(
+    NumberOfSlowness DESC,
+    AvgDurationMs DESC,
+    QueryHash
+);
+
+---- Default final output
+--SELECT TOP (100)
+--    *
+--FROM #SlowQueryHashSummary
+--WHERE ExampleQueryText like '%ProductiePlanningDataView%'
+--ORDER BY
+--    NumberOfSlowness DESC,
+    --AvgDurationMs DESC;
+
+    -- Default final output
+SELECT TOP (100)
+    *
+FROM #SlowQueryHashSummary
+ORDER BY
+    NumberOfSlowness DESC,
+    AvgDurationMs DESC;
+
+
+    
